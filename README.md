@@ -1,22 +1,29 @@
-# paperless-titles-from-ai
+# Paperless x Mistral AI - Title and OCR
 
-This is a project to generate meaningful titles for ingested [paperless](https://docs.paperless-ngx.com/) documents using AI. Sends the OCR text of the document to the OpenAI API and generates a title for the document. The title is then saved to the document's metadata.
+This is a fork of [paperless-titles-from-ai](https://github.com/sjafferali/paperless-titles-from-ai) that adds Mistral AI's OCR capabilities and improves on the document processing pipeline.
 
-## Examples of Generated Titles
-- taxreturntranscript2022
-- aigclaims_check_20230313
-- prosharesultrabloombergtax2023
+> [!NOTE]
+> Big thanks to [sjafferali](https://github.com/sjafferali) for the original project! As this project severely modifies the original, I've decided to create a new project instead of contributing back to the original.
+
+## Features
+
+- Uses [Mistral AI's powerful OCR model](https://mistral.ai/news/mistral-ocr) to extract text from documents
+- Generates meaningful titles for documents based on their content (just like the original project)
+- Updates both the document title and OCR content in Paperless-ngx
+- Supports batch processing for existing documents
+- Tracks processed documents using custom fields
+- Smarter title generation using similar documents to maintain naming consistency
 
 ## Setup
 
 ### Clone Repository
 ```bash
-git clone https://github.com/sjafferali/paperless-titles-from-ai.git
+git clone TODO
 ```
 
 ### Create .env file
 ```bash
-cp -av paperless-titles-from-ai/.env.example paperless-titles-from-ai/.env
+cp .env.example .env
 # Update .env file with the correct values
 ```
 
@@ -36,13 +43,22 @@ services:
     PAPERLESS_POST_CONSUME_SCRIPT: /usr/src/paperless/scripts/app/main.py
 ```
 
-The init folder (used to ensure open package is installed) must be owned by root.
+> [!IMPORTANT]
+> The init folder (used to ensure mistralai package is installed) must be owned by root.
 
-## Back-filling Titles on Existing Documents
-To back-fill titles on existing documents, run the helper cli from the project directory:
+## Processing Documents
+
+### New Documents (Post-Consume)
+The script will automatically process new documents as they are ingested into Paperless-ngx. It will:
+1. Perform OCR on the document (using either Mistral AI or Paperless-ngx's built-in OCR)
+2. Generate a meaningful title based on the document content and similar documents
+3. Update the document with both the new title and OCR text
+
+### Backlog Processing
+To process existing documents, you can use the Python CLI directly:
 
 ```bash
-docker run --rm -v ./app:/app python:3 /app/scripts/backfill.sh [args] [single|all]
+python app/cli.py [args] [single|all]
 ```
 
 **Arguments**
@@ -51,18 +67,23 @@ docker run --rm -v ./app:/app python:3 /app/scripts/backfill.sh [args] [single|a
 |-----------------------|----------|------------------------------|-----------------------------------------------------------------------|
 | --paperlessurl [URL]  | Yes      | https://paperless.local:8080 | Sets the URL of the paperless API endpoint.                           |
 | --paperlesskey [KEY]  | Yes      |                              | Sets the API key to use when authenticating to paperless.             |
-| --openaimodel [MODEL] | No       | gpt-4-turbo                  | Sets the OpenAI model used to generate title. Full list of supported models available at [models](https://platform.openai.com/docs/models).                         |
-| --openaibaseurl [API Endpoint] | No      |                              | Sets the OpenAI compatible endpoint to generate the title from.                           |
-| --openaikey [KEY]     | Yes      |                              | Sets the OpenAI key used to generate title.                           |
+| --mistralmodel [MODEL] | No       | mistral-large-latest         | Sets the Mistral AI model used to generate title.                     |
+| --mistralkey [KEY]     | Yes      |                              | Sets the Mistral API key used to generate title.                      |
+| --ocr-model [MODEL]   | No       | mistral-ocr-latest           | Sets the Mistral OCR model to use for OCR processing.                 |
+| --use-paperless-ocr   | No       | false                        | Use Paperless-ngx built-in OCR instead of Mistral's OCR capabilities. |
 | --dry                 | No       | False                        | Enables dry run which only prints out the changes that would be made. |
 | --loglevel [LEVEL]    | No       | INFO                         | Loglevel sets the desired loglevel.                                   |
+| --track-processed     | No       | true                         | Enable tracking of processed documents using custom fields.            |
+| --processed-field-id N| No       | 3                           | Custom field ID for tracking processed documents.                      |
+| --processed-field-name NAME| No  | mistral_processed          | Custom field name for tracking processed documents.                    |
+| --reprocess          | No       | false                       | Force reprocessing of already processed documents.                     |
 
 ### To run on all documents
 ```bash
-docker run --rm -v ./app:/app python:3 /app/scripts/backfill.sh [args] all [filter_args]
+python app/cli.py [args] all [filter_args]
 ```
 
-**Arguments**
+**Filter Arguments**
 
 | Option         | Required | Default | Description                                                                                           |
 |----------------|----------|---------|-------------------------------------------------------------------------------------------------------|
@@ -71,18 +92,18 @@ docker run --rm -v ./app:/app python:3 /app/scripts/backfill.sh [args] all [filt
 
 ### To run on a single document
 ```bash
-docker run --rm -v ./app:/app python:3 /app/scripts/backfill.sh [args] single (document_id)
+python app/cli.py [args] single (document_id)
 ```
 
-
-
 ## Additional Notes
-- The default OpenAI model used for generation is gpt-4-turbo. For a slightly less accurate title generation, but drastically reduced cost, use a GPT 3.5 model.
-- The number of characters of the OCR text that is sent varies depending on the model being used. We try to send the maximum number the model supports to get the best generation we can.
+- The default Mistral model used for generation is `mistral-large-latest`.
+- The OCR model used is `mistral-ocr-latest`, which provides superior OCR capabilities compared to Paperless-ngx's built-in OCR.
+- The script will first perform OCR on the original document and then generate a title based on the OCR text.
+- Both the title and OCR text are saved back to the document in Paperless-ngx.
 
-# Privacy Concerns
-Although the [OpenAI API privacy document](https://openai.com/enterprise-privacy/) states that data sent to the OpenAI API is not used for training, other OpenAI compatible API endpoints are also supported by this post-consume script, which allows you to use a locally hosted LLM to generate titles.
-
+> [!CAUTION]
+> This project was hacked together in a few hours, so there are likely some bugs and improvements that can be made. 
+> Thus as always, use at your own risk and remember to back up your data!
 
 ## Contact, Support and Contributions
 - Create a GitHub issue for bug reports, feature requests, or questions.
