@@ -18,7 +18,7 @@ This is a fork of [paperless-titles-from-ai](https://github.com/sjafferali/paper
 
 ### Clone Repository
 ```bash
-git clone TODO
+git clone https://github.com/tomvoelker/paperless-mistral-ocr-titles.git
 ```
 
 ### Create .env file
