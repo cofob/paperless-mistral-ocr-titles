@@ -37,5 +37,5 @@ USE_PAPERLESS_OCR = os.getenv("USE_PAPERLESS_OCR", "false").lower() == "true"
 # Custom field tracking configuration
 TRACK_PROCESSED = os.getenv("TRACK_PROCESSED", "true").lower() == "true"
 PROCESSED_FIELD_ID = int(os.getenv("PROCESSED_FIELD_ID", "3"))
-PROCESSED_FIELD_NAME = os.getenv("PROCESSED_FIELD_NAME", "mistrall_processed")
+PROCESSED_FIELD_NAME = os.getenv("PROCESSED_FIELD_NAME", "mistral_processed")
 REPROCESS_DOCUMENTS = os.getenv("REPROCESS_DOCUMENTS", "false").lower() == "true"
