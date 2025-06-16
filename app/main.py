@@ -25,7 +25,7 @@ from cfg import (
     USE_PAPERLESS_OCR,
 )
 from helpers import make_request, strtobool
-from mistralai import FilePurpose, Mistral
+from mistralai import Mistral
 
 
 def check_args(doc_pk):
@@ -117,59 +117,43 @@ def perform_mistral_ocr(file_path, mistral_api_key):
             logging.warning(f"Failed to delete temporary Mistral file: {e}")
 
 
-def generate_title(content, model, api_key, similar_docs=None):
-    """Generate a title for the document content using Mistral AI with JSON response format."""
+def verify_ocr_content(content, model, api_key):
+    """
+    Uses an LLM to verify if the OCR content is meaningful or garbage.
+    Returns True if the content is garbage, False otherwise.
+    """
     client = Mistral(api_key=api_key)
-    now = datetime.now()
-
-    # Build the context with similar documents if available
-    context = now.strftime("%m/%d/%Y") + " " + content[:4000]
-
-    if similar_docs:
-        similar_titles = "\nTitles of similar documents:\n" + "\n".join([f"- {doc['title']}" for doc in similar_docs])
-        context += similar_titles
+    # Use a truncated version of the content for verification to save tokens/time
+    context = content[:6000]
 
     messages = [{"role": "system", "content": PROMPT}, {"role": "user", "content": context}]
 
     try:
-        chat_response = client.chat.complete(model=model, messages=messages, response_format={"type": "json_object"})
+        chat_response = client.chat.complete(model=model, messages=messages, response_format={"type": "json_object"}, max_tokens=50)
 
         if not chat_response.choices:
-            logging.error("No response from Mistral")
+            logging.error("No response from Mistral for OCR verification")
             return None
 
-        # The response is already in JSON format, so we can return it directly
-        return chat_response.choices[0].message.content
+        response_content = chat_response.choices[0].message.content
+        data = json.loads(response_content)
+
+        if "is_garbage" not in data or not isinstance(data["is_garbage"], bool):
+            logging.error(f"Invalid JSON response from Mistral for verification: {response_content}")
+            return None
+
+        return data["is_garbage"]
+
+    except json.JSONDecodeError as e:
+        logging.error(f"Error parsing JSON response from Mistral verification: {e}")
+        return None
     except Exception as e:
-        logging.error(f"Error generating title with Mistral: {e}")
+        logging.error(f"Error verifying content with Mistral: {e}")
         return None
 
 
 def set_auth_tokens(session: requests.Session, api_key):
     session.headers.update({"Authorization": f"Token {api_key}"})
-
-
-def parse_response(response):
-    """Parse the JSON response from Mistral."""
-    try:
-        data = json.loads(response)
-        return data["title"], data.get("explanation", "")
-    except json.JSONDecodeError as e:
-        logging.error(f"Error parsing JSON response: {e}")
-        return None, None
-    except KeyError as e:
-        logging.error(f"Missing required field in response: {e}")
-        return None, None
-
-
-def update_document_title(sess, doc_pk, title, paperless_url):
-    url = paperless_url + f"/api/documents/{doc_pk}/"
-    body = {"title": title}
-    resp = make_request(sess, url, "PATCH", body=body)
-    if not resp:
-        logging.error(f"could not update document {doc_pk} title to {title}")
-        return
-    logging.info(f"updated document {doc_pk} title to {title}")
 
 
 def update_document_content(sess, doc_pk, content, paperless_url):
@@ -297,61 +281,58 @@ def update_document_processed_status(sess, doc_pk, paperless_url, field_id):
     return True
 
 
-def process_single_document(
-    sess, doc_pk, doc_title, doc_contents, doc_source_path, doc_info, paperless_url, mistral_model, mistral_api_key, dry_run=False
-):
-    temp_dir = None
+def process_single_document(sess, doc_pk, doc_source_path, doc_info, paperless_url, mistral_model, mistral_api_key, dry_run=False):
     try:
         # If tracking is enabled, check if document has already been processed
         if TRACK_PROCESSED and not REPROCESS_DOCUMENTS:
             custom_fields = get_document_custom_fields(doc_info)
             if check_document_processed(custom_fields, PROCESSED_FIELD_ID):
                 logging.info(f"Document {doc_pk} has already been processed, skipping (set REPROCESS_DOCUMENTS=true to reprocess)")
-                return False
+                return False, True # Skipped
 
+        ocr_content = None
         # If configured to use Mistral OCR, perform OCR on the document
         if not USE_PAPERLESS_OCR and doc_source_path:
-            new_content = perform_mistral_ocr(doc_source_path, mistral_api_key)
-            if not new_content:
-                logging.error(f"Failed to perform OCR on document {doc_pk}, using existing content")
-            else:
-                doc_contents = new_content
-                if not dry_run:
-                    update_document_content(sess, doc_pk, doc_contents, paperless_url)
-                else:
-                    logging.info(f"would update document {doc_pk} content to: \n\n{doc_contents}")
-
-        # Find similar documents
-        similar_docs = find_similar_documents(sess, doc_pk, paperless_url)
-        if similar_docs:
-            logging.info(
-                f"Found {len(similar_docs)} similar documents to help with title generation: {[similar_doc['title'] for similar_doc in similar_docs]}"
-            )
+            logging.info(f"Performing Mistral OCR for document {doc_pk}")
+            ocr_content = perform_mistral_ocr(doc_source_path, mistral_api_key)
+            if not ocr_content:
+                logging.error(f"Failed to perform OCR on document {doc_pk}, skipping.")
+                return False, False # Failed
         else:
-            logging.info(f"No similar documents found for document {doc_pk}")
+            # Use existing content if not using Mistral OCR
+            logging.info(f"Using existing Paperless OCR content for document {doc_pk}")
+            ocr_content = doc_info.get("content", "")
 
-        response = generate_title(doc_contents, mistral_model, mistral_api_key, similar_docs)
-        if not response:
-            logging.error(f"could not generate title for document {doc_pk}")
-            return False
-        title, explain = parse_response(response)
-        if not title:
-            logging.error(f"could not parse response for document {doc_pk}: {response}")
-            return False
-        logging.info(f"will update document {doc_pk} title from {doc_title} to: {title} because {explain}")
+        if not ocr_content or not ocr_content.strip():
+            logging.warning(f"Document {doc_pk} has no content to process, skipping.")
+            return False, True # Skipped
 
-        # Update the document title
-        if not dry_run:
-            update_document_title(sess, doc_pk, title, paperless_url)
+        # Post-process OCR with LLM to check for garbage
+        is_garbage = verify_ocr_content(ocr_content, mistral_model, mistral_api_key)
 
-            # Update the processed status if tracking is enabled
-            if TRACK_PROCESSED:
-                update_document_processed_status(sess, doc_pk, paperless_url, PROCESSED_FIELD_ID)
+        if is_garbage is None:
+            logging.error(f"Could not verify OCR content for document {doc_pk}. Skipping update.")
+            return False, False # Failed
 
-        return True
+        if is_garbage:
+            logging.warning(f"OCR content for document {doc_pk} determined to be garbage. No changes will be made.")
+        else:
+            logging.info(f"OCR content for document {doc_pk} is valid. Updating document.")
+            if not dry_run:
+                update_document_content(sess, doc_pk, ocr_content, paperless_url)
+            else:
+                logging.info(f"DRY RUN: Would update document {doc_pk} with new OCR content.")
+
+        # Update the processed status if tracking is enabled, regardless of garbage status
+        if not dry_run and TRACK_PROCESSED:
+            update_document_processed_status(sess, doc_pk, paperless_url, PROCESSED_FIELD_ID)
+        elif dry_run and TRACK_PROCESSED:
+            logging.info(f"DRY RUN: Would update processed status for document {doc_pk}")
+
+        return True, False # Success
     except Exception as e:
         logging.error(f"Error processing document {doc_pk}: {e}")
-        return False
+        return False, False # Failed
     finally:
         # Clean up the temporary file if we created one
         if doc_source_path and os.path.exists(doc_source_path) and "temp_docs" in doc_source_path:
@@ -373,8 +354,7 @@ def run_for_document(doc_pk):
     with requests.Session() as sess:
         set_auth_tokens(sess, PAPERLESS_API_KEY)
 
-        # Check if we're tracking processed documents and ensure the field exists
-        global PROCESSED_FIELD_ID  # Move global declaration to the beginning of the scope
+        global PROCESSED_FIELD_ID
         if TRACK_PROCESSED:
             field_id = ensure_custom_field_exists(sess, PAPERLESS_URL, PROCESSED_FIELD_NAME, PROCESSED_FIELD_ID)
             if field_id and field_id != PROCESSED_FIELD_ID:
@@ -386,34 +366,18 @@ def run_for_document(doc_pk):
             logging.error(f"could not retrieve document info for document {doc_pk}")
             return
 
-        doc_contents = doc_info["content"]
-        doc_title = doc_info["title"]
         doc_source_path = os.getenv("DOCUMENT_SOURCE_PATH", None)
 
         process_single_document(
-            sess, doc_pk, doc_title, doc_contents, doc_source_path, doc_info, PAPERLESS_URL, MISTRAL_MODEL, MISTRAL_API_KEY, DRY_RUN
+            sess,
+            doc_pk,
+            doc_source_path,
+            doc_info,
+            PAPERLESS_URL,
+            MISTRAL_MODEL,
+            MISTRAL_API_KEY,
+            DRY_RUN,
         )
-
-
-def find_similar_documents(sess, doc_pk, paperless_url, limit=5):
-    """Find similar documents using Paperless-ngx's 'more like' search API."""
-
-    # Use the 'more_like_id' endpoint to find similar documents
-    url = f"{paperless_url}/api/documents/"
-    params = {"more_like_id": doc_pk, "ordering": "-score", "page_size": limit}  # Sort by relevance
-
-    resp = make_request(sess, url, "GET", params=params)
-    if not resp or not isinstance(resp, dict):
-        logging.error("Could not retrieve similar documents")
-        return []
-
-    # Extract titles of similar documents
-    similar_docs = []
-    for doc in resp.get("results", []):
-        if doc.get("id") != doc_pk:  # Double check we're not including the current document
-            similar_docs.append({"id": doc.get("id"), "title": doc.get("title"), "score": doc.get("score", 0)})
-
-    return similar_docs
 
 
 if __name__ == "__main__":
@@ -430,7 +394,7 @@ if __name__ == "__main__":
             shutil.rmtree(temp_dir)
             logging.debug(f"Cleaned up temporary directory: {temp_dir}")
         except Exception as e:
-            logging.warning(f"Failed to clean temporary directory {temp_dir}: {e}")
+            logging.warning(f"Failed to clean up temporary directory {temp_dir}: {e}")
     os.makedirs(temp_dir, exist_ok=True)
 
     run_for_document(os.getenv("DOCUMENT_ID"))

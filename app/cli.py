@@ -20,7 +20,14 @@ from cfg import (
     TRACK_PROCESSED,
     USE_PAPERLESS_OCR,
 )
-from main import ensure_custom_field_exists, get_document_custom_fields, get_single_document, make_request, process_single_document, set_auth_tokens
+from main import (
+    ensure_custom_field_exists,
+    get_document_custom_fields,
+    get_single_document,
+    make_request,
+    process_single_document,
+    set_auth_tokens,
+)
 
 
 def get_all_documents(sess, paperless_url, advanced_filter=None):
@@ -111,17 +118,12 @@ def run_single_document(args):
                 logging.error(f"could not retrieve document info for document {args.document_id}")
                 return
 
-            doc_contents = doc_info["content"]
-            doc_title = doc_info["title"]
-
             # Download the document
             doc_source_path = download_document(sess, args.document_id, args.paperlessurl, temp_dir)
 
             process_single_document(
                 sess,
                 args.document_id,
-                doc_title,
-                doc_contents,
                 doc_source_path,
                 doc_info,
                 args.paperlessurl,
@@ -144,15 +146,13 @@ def run_single_document(args):
 def process_document_with_retry(sess, doc, temp_dir, args, max_retries=3):
     """Process a single document with retry logic"""
     doc_id = doc["id"]
-    doc_title = doc["title"]
-    doc_content = doc["content"]
 
     # Skip if already processed and reprocessing is not enabled
     if args.track_processed and not args.reprocess:
         custom_fields = get_document_custom_fields(doc)
         if args.processed_field_id in custom_fields and custom_fields[args.processed_field_id]:
             logging.info(f"Document {doc_id} has already been processed, skipping (use --reprocess to force reprocessing)")
-            return True  # Return success since we're skipping by design
+            return True, True  # Skipped
 
     retries = 0
     while retries < max_retries:
@@ -160,11 +160,9 @@ def process_document_with_retry(sess, doc, temp_dir, args, max_retries=3):
             # Download the document
             doc_source_path = download_document(sess, doc_id, args.paperlessurl, temp_dir)
 
-            process_single_document(
+            success, skipped = process_single_document(
                 sess,
                 doc_id,
-                doc_title,
-                doc_content,
                 doc_source_path,
                 doc,
                 args.paperlessurl,
@@ -172,7 +170,7 @@ def process_document_with_retry(sess, doc, temp_dir, args, max_retries=3):
                 args.mistralkey,
                 args.dry,
             )
-            return True
+            return success, skipped
         except Exception as e:
             retries += 1
             logging.error(f"Error processing document {doc_id} (attempt {retries}/{max_retries}): {e}")
@@ -180,7 +178,7 @@ def process_document_with_retry(sess, doc, temp_dir, args, max_retries=3):
             time.sleep(2)
 
     logging.error(f"Failed to process document {doc_id} after {max_retries} attempts")
-    return False
+    return False, False
 
 
 def run_all_documents(args):
@@ -221,30 +219,36 @@ def run_all_documents(args):
             success_count = 0
             failed_count = 0
             skipped_count = 0
-
-            for i, doc in enumerate(all_docs, 1):
-                doc_id = doc["id"]
-
-                # Skip if already processed and reprocessing is not enabled
+            
+            docs_to_process = []
+            for doc in all_docs:
+                # Pre-flight skip check
                 if args.track_processed and not args.reprocess:
                     custom_fields = get_document_custom_fields(doc)
                     if args.processed_field_id in custom_fields and custom_fields[args.processed_field_id]:
-                        logging.info(f"Document {doc_id} has already been processed, skipping (use --reprocess to force reprocessing)")
                         skipped_count += 1
                         continue
+                docs_to_process.append(doc)
 
-                logging.info(f"Processing document {i}/{len(all_docs)} (ID: {doc_id})")
-                result = process_document_with_retry(sess, doc, temp_dir, args)
+            logging.info(f"Processing {len(docs_to_process)} documents ({skipped_count} documents were already processed and skipped)")
 
-                if result:
+            for i, doc in enumerate(docs_to_process, 1):
+                doc_id = doc["id"]
+                
+                logging.info(f"Processing document {i}/{len(docs_to_process)} (ID: {doc_id})")
+                success, skipped = process_document_with_retry(sess, doc, temp_dir, args)
+
+                if skipped:
+                    skipped_count += 1
+                elif success:
                     success_count += 1
                 else:
                     failed_count += 1
 
                 # Log progress periodically
-                if i % 10 == 0 or i == len(all_docs):
+                if i % 10 == 0 or i == len(docs_to_process):
                     logging.info(
-                        f"Progress: {i}/{len(all_docs)} documents processed ({success_count} success, {failed_count} failed, {skipped_count} skipped)"
+                        f"Progress: {i}/{len(docs_to_process)} documents processed ({success_count} success, {failed_count} failed, {skipped_count} total skipped)"
                     )
 
                 # Clean up temporary files periodically to avoid filling disk
@@ -258,7 +262,7 @@ def run_all_documents(args):
                     except Exception as e:
                         logging.warning(f"Failed to clean temporary files: {e}")
 
-            logging.info(f"Completed processing {len(all_docs)} documents")
+            logging.info(f"Completed processing {len(docs_to_process)} documents")
             logging.info(f"Results: {success_count} successful, {failed_count} failed, {skipped_count} skipped")
     except Exception as e:
         logging.error(f"Error during batch processing: {e}")
